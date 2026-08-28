@@ -7,7 +7,7 @@ import { Modal } from '../ui/overlays';
 
 type Method = 'email' | 'username';
 
-export function AuthModal() {
+export function AuthModal({ mode = 'primary', onComplete }: { mode?: 'primary' | 'append'; onComplete?: () => void }) {
   const ready = useAuthStore((s) => s.ready);
   const user = useAuthStore((s) => s.user);
   const guest = useAuthStore((s) => s.guest);
@@ -28,7 +28,8 @@ export function AuthModal() {
   const [projectUrl, setProjectUrl] = useState('');
   const [anonKey, setAnonKey] = useState('');
 
-  if (!ready || guest || user) return null;
+  const append = mode === 'append';
+  if (!ready || guest || (user && !append)) return null;
 
   function saveConnection() {
     try {
@@ -51,6 +52,7 @@ export function AuthModal() {
     try {
       const result = await action();
       if (result) setError(result.message);
+      else onComplete?.();
     } catch {
       setError('Something went wrong. Please try again.');
     } finally {
@@ -84,7 +86,7 @@ export function AuthModal() {
   }
 
   return (
-    <Modal open onClose={() => undefined} dismissable={false} width="sm" title="Welcome to Beacon" description="Sign in to keep your communities and messages in sync.">
+    <Modal open onClose={append ? onComplete ?? (() => undefined) : () => undefined} dismissable={append} width="sm" title={append ? 'Add account' : 'Welcome to Beacon'} description="Sign in to keep your communities and messages in sync.">
       <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-line bg-canvas p-1">
         <AuthTab active={method === 'email'} onClick={() => setMethod('email')} icon={<Mail size={14} />} label="Email" />
         <AuthTab active={method === 'username'} onClick={() => setMethod('username')} icon={<UserRound size={14} />} label="Username" />
@@ -115,7 +117,7 @@ export function AuthModal() {
       <button type="button" onClick={() => setCreate((value) => !value)} className="mt-3 w-full text-[12px] text-ink-mute hover:text-ink-dim">{create ? 'Already have an account? Log in' : 'New here? Create an account'}</button>
       <div className="my-4 flex items-center gap-3"><span className="h-px flex-1 bg-line" /><span className="text-[11px] text-ink-mute">or</span><span className="h-px flex-1 bg-line" /></div>
       <Button variant="solid" block onClick={() => void run(signInWithGoogle)}>Continue with Google</Button>
-      <button type="button" onClick={continueAsGuest} className="mt-3 w-full text-[12px] text-ink-mute hover:text-ink-dim">Continue as local guest</button>
+      {!append && <button type="button" onClick={continueAsGuest} className="mt-3 w-full text-[12px] text-ink-mute hover:text-ink-dim">Continue as local guest</button>}
     </Modal>
   );
 }

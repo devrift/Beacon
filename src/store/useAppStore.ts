@@ -5,6 +5,7 @@ import { DEFAULT_APPEARANCE } from '../theme/types';
 import { DEFAULT_THEME_ID, PRESET_THEMES } from '../theme/presets';
 import { hueFromString, inviteCode, uid } from '../lib/id';
 import { deleteBlob } from '../lib/blobStore';
+import { IS_SUPABASE_CONFIGURED, supabase } from '../supabase';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -241,6 +242,8 @@ interface AppState {
   renameChannel: (id: string, name: string) => void;
   setChannelTopic: (id: string, topic: string) => void;
   setMembers: (members: Member[]) => void;
+  fetchUserServers: (userId: string) => Promise<void>;
+  clearAppState: () => void;
 
   // ── Messages ───────────────────────────────────────────────────────────────
   messagesByChannel: Record<string, Message[]>;
@@ -427,6 +430,31 @@ export const useAppStore = create<AppState>()(
           activeServerId: server.id,
           activeChannelId: channel.id,
         }));
+        if (IS_SUPABASE_CONFIGURED) {
+          void (async () => {
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData.session?.user.id;
+            if (!userId) return;
+            const { data: remote, error } = await supabase
+              .from('servers')
+              .insert({ name: server.name, owner_id: userId, invite_code: server.invite_code, icon_color: server.icon_color, description: server.description })
+              .select('*')
+              .single();
+            if (error || !remote) return;
+            const remoteServer = remote as Server;
+            const { error: memberError } = await supabase.from('server_members').insert({ server_id: remoteServer.id, user_id: userId, role: 'owner' });
+            if (memberError) return;
+            const { data: remoteChannel } = await supabase.from('channels').insert({ server_id: remoteServer.id, name: 'general', type: 'TEXT', topic: channel.topic }).select('*').single();
+            if (!remoteChannel) return;
+            const syncedChannel = remoteChannel as Channel;
+            set((state) => ({
+              servers: state.servers.map((item) => item.id === server.id ? remoteServer : item),
+              channels: state.channels.map((item) => item.id === channel.id ? syncedChannel : item),
+              activeServerId: state.activeServerId === server.id ? remoteServer.id : state.activeServerId,
+              activeChannelId: state.activeChannelId === channel.id ? syncedChannel.id : state.activeChannelId,
+            }));
+          })();
+        }
         return { server, channel };
       },
 
@@ -547,6 +575,20 @@ export const useAppStore = create<AppState>()(
         })),
 
       setMembers: (members) => set({ members }),
+      clearAppState: () => set({ servers: [], channels: [], members: [], messagesByChannel: {}, activeServerId: null, activeChannelId: null, drafts: {} }),
+      fetchUserServers: async (userId) => {
+        if (!IS_SUPABASE_CONFIGURED) return;
+        const { data, error } = await supabase.from('server_members').select('server_id, servers(*)').eq('user_id', userId);
+        if (error) return;
+        const servers = (data ?? []).map((row) => {
+          const related = (row as unknown as { servers?: Server | Server[] }).servers;
+          return Array.isArray(related) ? related[0] : related;
+        }).filter((server): server is Server => Boolean(server));
+        const ids = servers.map((server) => server.id);
+        const { data: channelData } = ids.length ? await supabase.from('channels').select('*').in('server_id', ids) : { data: [] };
+        const channels = (channelData ?? []) as Channel[];
+        set({ servers, channels, activeServerId: servers[0]?.id ?? null, activeChannelId: channels.find((channel) => channel.server_id === servers[0]?.id && channel.type === 'TEXT')?.id ?? null });
+      },
 
       // ── Messages ─────────────────────────────────────────────────────────────
       messagesByChannel: {},

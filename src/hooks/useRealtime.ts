@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { IS_SUPABASE_CONFIGURED, supabase } from '../supabase';
-import { useAppStore, type Channel, type Message, type Server } from '../store/useAppStore';
+import { useAppStore, type Channel, type Message } from '../store/useAppStore';
 import { useAuthStore } from '../store/useAuthStore';
 
 const asMessage = (row: unknown) => row as Message;
@@ -12,14 +12,7 @@ export function useRealtime(): void {
 
   useEffect(() => {
     if (!IS_SUPABASE_CONFIGURED || !user) return;
-    let alive = true;
-    useAppStore.setState({ servers: [], channels: [], members: [], messagesByChannel: {}, activeServerId: null, activeChannelId: null });
-    const appendServer = (server: Server) =>
-      useAppStore.setState((state) =>
-        state.servers.some((item) => item.id === server.id)
-          ? state
-          : { servers: [...state.servers, server] },
-      );
+    useAppStore.getState().clearAppState();
     const appendChannel = (channel: Channel) =>
       useAppStore.setState((state) =>
         state.channels.some((item) => item.id === channel.id)
@@ -32,31 +25,17 @@ export function useRealtime(): void {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (payload) => {
         if (payload.eventType !== 'DELETE') useAppStore.getState().addMessage(asMessage(payload.new));
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'servers' }, (payload) => {
-        if (payload.eventType !== 'DELETE') appendServer(payload.new as Server);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'server_members', filter: `user_id=eq.${user.id}` }, () => {
+        void useAppStore.getState().fetchUserServers(user.id);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'channels' }, (payload) => {
         if (payload.eventType !== 'DELETE') appendChannel(asChannel(payload.new));
       })
       .subscribe();
 
-    void supabase
-      .from('servers')
-      .select('*')
-      .eq('owner_id', user.id)
-      .then(async ({ data, error }) => {
-        if (!alive || error) return;
-        const servers = (data ?? []) as Server[];
-        useAppStore.setState({ servers });
-        const ids = servers.map((server) => server.id);
-        if (ids.length === 0) return;
-        const { data: channelData, error: channelError } = await supabase.from('channels').select('*').in('server_id', ids);
-        if (!alive || channelError) return;
-        useAppStore.setState({ channels: (channelData ?? []) as Channel[] });
-      });
+    void useAppStore.getState().fetchUserServers(user.id);
 
     return () => {
-      alive = false;
       void supabase.removeChannel(realtime);
     };
   }, [user]);

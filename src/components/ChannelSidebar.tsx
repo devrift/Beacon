@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   BellOff,
@@ -17,6 +17,9 @@ import {
   CircleMinus,
   UserCheck,
   LogOut,
+  Check,
+  ChevronRight,
+  X,
 } from 'lucide-react';
 import { cx } from '../lib/cx';
 import { useAttachmentUrl } from '../hooks/useObjectUrl';
@@ -24,6 +27,8 @@ import { useAppStore, unreadCount, type Channel, type Server } from '../store/us
 import { Avatar, IconButton } from '../ui/primitives';
 import { ConfirmDialog, Popover } from '../ui/overlays';
 import { useAuthStore } from '../store/useAuthStore';
+import { IS_SUPABASE_CONFIGURED, supabase } from '../supabase';
+import { AuthModal } from './AuthModal';
 
 /**
  * The spine.
@@ -164,13 +169,36 @@ function UserBar() {
   const openDialog = useAppStore((s) => s.openDialog);
   const anchor = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const [appendAuth, setAppendAuth] = useState(false);
   const logout = useAuthStore((s) => s.logout);
+  const storedAccounts = useAuthStore((s) => s.storedAccounts);
+  const switchAccount = useAuthStore((s) => s.switchAccount);
+  const removeAccount = useAuthStore((s) => s.removeAccount);
 
   const setPresence = (presence: typeof user.presence) => {
     useAppStore.getState().setAppUser({ presence });
+    if (presence === 'dnd') useAppStore.getState().setSoundEnabled(false);
+    if (IS_SUPABASE_CONFIGURED) void supabase.from('profiles').update({ status: presence }).eq('id', user.id);
     setOpen(false);
   };
+  const saved = storedAccounts();
+
+  useEffect(() => {
+    if (user.presence === 'dnd' || user.presence === 'offline') return;
+    let timer = 0;
+    const reset = () => {
+      window.clearTimeout(timer);
+      if (useAppStore.getState().appUser.presence === 'idle') useAppStore.getState().setAppUser({ presence: 'online' });
+      timer = window.setTimeout(() => {
+        if (useAppStore.getState().appUser.presence === 'online') useAppStore.getState().setAppUser({ presence: 'idle' });
+      }, 300000);
+    };
+    ['pointerdown', 'keydown', 'mousemove', 'touchstart'].forEach((event) => window.addEventListener(event, reset, { passive: true }));
+    reset();
+    return () => { window.clearTimeout(timer); ['pointerdown', 'keydown', 'mousemove', 'touchstart'].forEach((event) => window.removeEventListener(event, reset)); };
+  }, [user.presence]);
 
   return (
     <div className="flex h-9 items-center gap-1">
@@ -188,24 +216,25 @@ function UserBar() {
         {isDeafened ? <HeadphoneOff size={14} className="text-danger" /> : <Headphones size={14} />}
       </IconButton>
       <IconButton label="Settings" size="sm" onClick={() => openDialog('settings')}><Settings size={14} /></IconButton>
-      <Popover open={open} onClose={() => setOpen(false)} anchorRef={anchor} placement="top" className="w-[232px]">
-        <div className="p-1">
+      <Popover open={open} onClose={() => { setOpen(false); setStatusOpen(false); setAccountsOpen(false); }} anchorRef={anchor} placement="top" className="w-[232px]">
+        <div className="relative transform-gpu p-1 transition-opacity duration-150">
           <MenuItem icon={<Pencil size={14} />} label="Edit profile" onClick={() => { setOpen(false); openDialog('profile'); }} />
           <div className="my-1 h-px bg-white/10" />
-          <div className="px-2 py-1 text-[11px] font-semibold text-ink-mute">Set status</div>
-          <MenuItem icon={<span className="h-2 w-2 rounded-full bg-ok" />} label="Online" onClick={() => setPresence('online')} />
-          <MenuItem icon={<Moon size={14} className="text-warn" />} label="Idle / Away" onClick={() => setPresence('idle')} />
-          <MenuItem icon={<CircleMinus size={14} className="text-danger" />} label="Do not disturb" onClick={() => setPresence('dnd')} />
-          <MenuItem icon={<span className="h-3 w-3 rounded-full border border-ink-mute" />} label="Invisible" onClick={() => setPresence('offline')} />
+          <MenuItem icon={<PresenceIcon presence={user.presence} />} label="Status" hint={<ChevronRight size={14} />} onClick={() => { setStatusOpen(!statusOpen); setAccountsOpen(false); }} />
+          <MenuItem icon={<UserCheck size={14} />} label="Switch accounts" hint={<ChevronRight size={14} />} onClick={() => { setAccountsOpen(!accountsOpen); setStatusOpen(false); }} />
           <div className="my-1 h-px bg-white/10" />
-          <MenuItem icon={<UserCheck size={14} />} label="Switch accounts" onClick={() => setAccountsOpen(!accountsOpen)} />
-          {accountsOpen && <div className="mx-1 rounded-md bg-hover p-1"><div className="px-2 py-1 text-[11px] text-ink-mute">{user.displayName || user.username}</div><MenuItem icon={<Plus size={13} />} label="Add account" onClick={() => void logout()} /></div>}
           <MenuItem icon={<LogOut size={14} />} label="Log out" danger onClick={() => void logout()} />
+          {statusOpen && <Flyout><MenuItem icon={<PresenceIcon presence="online" />} label="Online" onClick={() => setPresence('online')} /><MenuItem icon={<PresenceIcon presence="idle" />} label="Idle" onClick={() => setPresence('idle')} /><MenuItem icon={<PresenceIcon presence="dnd" />} label="Do not disturb" onClick={() => setPresence('dnd')} /><MenuItem icon={<PresenceIcon presence="offline" />} label="Invisible" onClick={() => setPresence('offline')} /></Flyout>}
+          {accountsOpen && <Flyout>{saved.map((account) => <div key={account.id} className="flex items-center gap-1"><button type="button" onClick={() => void switchAccount(account.id)} className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-sm px-2 text-left hover:bg-hover"><Avatar name={account.username || account.email} color="var(--accent)" size="sm" /><span className="min-w-0 flex-1"><span className="block truncate text-[12px] text-ink">{account.username || account.email}</span><span className="block truncate text-[10px] text-ink-mute">@{account.username || account.email.split('@')[0]}</span></span>{account.active && <Check size={13} className="text-ok" />}</button><button type="button" aria-label="Remove account" onClick={() => removeAccount(account.id)} className="mr-1 text-ink-mute hover:text-danger"><X size={13} /></button></div>)}<div className="my-1 h-px bg-white/10" /><MenuItem icon={<Plus size={13} />} label="Add account" onClick={() => setAppendAuth(true)} /></Flyout>}
         </div>
       </Popover>
+      {appendAuth && <AuthModal mode="append" onComplete={() => setAppendAuth(false)} />}
     </div>
   );
 }
+
+function Flyout({ children }: { children: React.ReactNode }) { return <div className="absolute top-0 left-full z-50 ml-2 min-w-[180px] rounded-md border border-white/10 bg-[#111214] p-1 shadow-2xl transform-gpu transition-opacity duration-150">{children}</div>; }
+function PresenceIcon({ presence }: { presence: 'online' | 'idle' | 'dnd' | 'offline' }) { if (presence === 'idle') return <Moon size={14} color="#f0b232" />; if (presence === 'dnd') return <CircleMinus size={14} color="#f23f43" />; if (presence === 'offline') return <span className="h-3 w-3 rounded-full border-2" style={{ borderColor: '#80848e' }} />; return <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: '#23a55a' }} />; }
 
 function ServerIdentity({ server }: { server: Server }) {
   const bannerUrl = useAttachmentUrl(server.banner);
@@ -405,7 +434,7 @@ function MenuItem({
 }: {
   icon: React.ReactNode;
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
   danger?: boolean;
   onClick: () => void;
 }) {
@@ -420,7 +449,7 @@ function MenuItem({
     >
       <span className="shrink-0 opacity-80">{icon}</span>
       <span className="truncate">{label}</span>
-      {hint && <span className="ml-auto font-mono text-[11px] text-ink-mute">{hint}</span>}
+      {hint && <span className="ml-auto text-[11px] text-ink-mute">{hint}</span>}
     </button>
   );
 }

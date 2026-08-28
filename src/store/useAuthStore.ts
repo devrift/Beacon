@@ -1,10 +1,31 @@
 import { create } from 'zustand';
-import type { User } from '@supabase/supabase-js';
+import type { Session, User } from '@supabase/supabase-js';
 import { hueFromString } from '../lib/id';
 import { IS_SUPABASE_CONFIGURED, supabase } from '../supabase';
 import { useAppStore } from './useAppStore';
 
 type AuthError = Error | null;
+
+export interface StoredAccount {
+  id: string;
+  email: string;
+  username: string;
+  avatar_url?: string;
+  token: string;
+  refresh_token?: string;
+  active?: boolean;
+}
+
+const ACCOUNTS_KEY = 'beacon_stored_accounts';
+function accounts(): StoredAccount[] {
+  try { return JSON.parse(localStorage.getItem(ACCOUNTS_KEY) ?? '[]') as StoredAccount[]; } catch { return []; }
+}
+function saveAccounts(next: StoredAccount[]): void { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(next)); }
+function saveSession(session: Session): void {
+  const metadata = session.user.user_metadata ?? {};
+  const next: StoredAccount = { id: session.user.id, email: session.user.email ?? '', username: String(metadata.username || metadata.user_name || session.user.email?.split('@')[0] || 'beacon_user'), avatar_url: typeof metadata.avatar_url === 'string' ? metadata.avatar_url : undefined, token: session.access_token, refresh_token: session.refresh_token, active: true };
+  saveAccounts([...accounts().filter((account) => account.id !== next.id).map((account) => ({ ...account, active: false })), next]);
+}
 
 interface AuthState {
   ready: boolean;
@@ -18,6 +39,10 @@ interface AuthState {
   signInWithUsername: (username: string, password: string) => Promise<AuthError>;
   signUpWithUsername: (username: string, password: string) => Promise<AuthError>;
   signInWithGoogle: () => Promise<AuthError>;
+  storedAccounts: () => StoredAccount[];
+  addAccount: (session: Session) => void;
+  switchAccount: (accountId: string) => Promise<AuthError>;
+  removeAccount: (accountId: string) => void;
   logout: () => Promise<AuthError>;
 }
 
@@ -64,12 +89,14 @@ export const useAuthStore = create<AuthState>((set) => ({
       return () => undefined;
     }
     void supabase.auth.getSession().then(({ data }) => {
-      syncUser(data.session?.user ?? null);
       set({ ready: true, user: data.session?.user ?? null, demoMode: false });
+      if (data.session) saveSession(data.session);
+      syncUser(data.session?.user ?? null);
     });
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      syncUser(session?.user ?? null);
       set({ ready: true, user: session?.user ?? null, demoMode: false, guest: false });
+      if (session) saveSession(session);
+      syncUser(session?.user ?? null);
     });
     return () => data.subscription.unsubscribe();
   },
@@ -109,6 +136,22 @@ export const useAuthStore = create<AuthState>((set) => ({
     const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' });
     return error;
   },
+  storedAccounts: accounts,
+  addAccount: saveSession,
+  switchAccount: async (accountId) => {
+    const account = accounts().find((item) => item.id === accountId);
+    if (!account) return new Error('Saved account not found.');
+    if (!account.refresh_token) return new Error('This account needs to sign in again.');
+    const { data, error } = await supabase.auth.setSession({ access_token: account.token, refresh_token: account.refresh_token });
+    if (error || !data.session) return error ?? new Error('Could not restore this account.');
+    saveSession(data.session);
+    useAppStore.getState().clearAppState();
+    set({ user: data.session.user, guest: false, demoMode: false });
+    syncUser(data.session.user);
+    void useAppStore.getState().fetchUserServers(data.session.user.id);
+    return null;
+  },
+  removeAccount: (accountId) => saveAccounts(accounts().filter((account) => account.id !== accountId)),
   logout: async () => {
     const { error } = await supabase.auth.signOut();
     if (!error) {
